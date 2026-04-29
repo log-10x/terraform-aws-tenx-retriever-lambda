@@ -1,0 +1,76 @@
+name: Validate Terraform Module
+
+on:
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout PR code
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v4
+
+      - name: Terraform fmt
+        run: terraform fmt -check
+
+      - name: Terraform Init
+        run: terraform init
+
+      - name: Terraform Validate
+        run: terraform validate
+
+      - name: Extract PR version
+        run: |
+          PR_VERSION=$(grep 'terraform-module-version' main.tf | awk -F'"' '{print $2}' | sed 's/^v//')
+          if [ -z "$PR_VERSION" ]; then
+            echo "Could not find terraform-module-version in main.tf"
+            exit 1
+          fi
+          echo "PR_VERSION=$PR_VERSION" >> $GITHUB_ENV
+
+      - name: Extract base version
+        run: |
+          BASE_SHA=${{ github.event.pull_request.base.sha }}
+          BASE_MAIN_TF=$(git show $BASE_SHA:main.tf)
+          BASE_VERSION=$(echo "$BASE_MAIN_TF" | grep 'terraform-module-version' | awk -F'"' '{print $2}' | sed 's/^v//')
+          if [ -z "$BASE_VERSION" ]; then
+            echo "Could not find terraform-module-version in base main.tf"
+            exit 1
+          fi
+          echo "BASE_VERSION=$BASE_VERSION" >> $GITHUB_ENV
+
+      - name: Compare versions
+        run: |
+          IFS='.' read -r -a pr_parts <<< "$PR_VERSION"
+          IFS='.' read -r -a base_parts <<< "$BASE_VERSION"
+          max_len=$(( ${#pr_parts[@]} > ${#base_parts[@]} ? ${#pr_parts[@]} : ${#base_parts[@]} ))
+          for ((i=0; i<max_len; i++)); do
+            pr_part=${pr_parts[i]:-0}
+            base_part=${base_parts[i]:-0}
+            if [ $pr_part -gt $base_part ]; then
+              echo "PR version is greater"
+              exit 0
+            elif [ $pr_part -lt $base_part ]; then
+              echo "PR version is not greater"
+              exit 1
+            fi
+          done
+          echo "Versions are equal"
+          exit 1
+
+      - name: Check if tag exists
+        run: |
+          TAG="v$PR_VERSION"
+          if git rev-parse "$TAG" > /dev/null 2>&1; then
+            echo "Tag $TAG already exists"
+            exit 1
+          else
+            echo "Tag $TAG does not exist"
+          fi

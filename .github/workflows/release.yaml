@@ -1,0 +1,31 @@
+name: Release Terraform Module
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0  # Fetch all history and tags
+
+      - name: Extract version
+        run: |
+          VERSION=$(grep 'terraform-module-version' main.tf | awk -F'"' '{print $2}')
+          if [ -z "$VERSION" ]; then
+            echo "Could not find terraform-module-version in main.tf"
+            exit 1
+          fi
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
+
+      - name: Create and push tag
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+          git tag $VERSION
+          git push origin $VERSION
