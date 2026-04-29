@@ -38,7 +38,8 @@ module "retriever" {
   version = "~> 1.0"
 
   name_prefix        = "my-retriever"
-  image_uri          = "public.ecr.aws/x8r1y5t9/lambda-10x:1.0.13"
+  # Must be a private ECR URI in the same AWS account as the Lambda — see Image section below.
+  image_uri          = "${data.aws_caller_identity.current.account_id}.dkr.ecr.${var.region}.amazonaws.com/lambda-10x:1.0.13"
   source_bucket_name = "my-raw-log-bucket"
   index_bucket_name  = "my-raw-log-bucket" # same as source — EKS-style layout
   tenx_api_key       = var.tenx_api_key
@@ -57,6 +58,32 @@ public.ecr.aws/x8r1y5t9/lambda-10x:<engine-version>
 ```
 
 Tags track the engine release. `1.0.13` is current; pin to a specific tag in production. The image is built from the engine's `pipeline/run-lambda/` module and tracks the matching `log10x/quarkus-10x` Docker Hub release.
+
+### Lambda doesn't pull from ECR Public — mirror to private ECR
+
+AWS Lambda **only pulls container images from a private ECR repository in the same AWS account** as the function. The image must be mirrored from ECR Public to your account's ECR before the module can deploy:
+
+```
+REGION=us-east-1
+ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
+
+aws ecr create-repository --repository-name lambda-10x --region $REGION
+
+docker pull public.ecr.aws/x8r1y5t9/lambda-10x:1.0.13
+docker tag  public.ecr.aws/x8r1y5t9/lambda-10x:1.0.13 \
+            ${ACCOUNT}.dkr.ecr.${REGION}.amazonaws.com/lambda-10x:1.0.13
+
+aws ecr get-login-password --region $REGION | docker login --username AWS \
+  --password-stdin ${ACCOUNT}.dkr.ecr.${REGION}.amazonaws.com
+
+docker push ${ACCOUNT}.dkr.ecr.${REGION}.amazonaws.com/lambda-10x:1.0.13
+```
+
+Then pass the private-ECR URI to `image_uri`:
+
+```hcl
+image_uri = "<account>.dkr.ecr.<region>.amazonaws.com/lambda-10x:1.0.13"
+```
 
 ## ⚠ Recursion guard
 
