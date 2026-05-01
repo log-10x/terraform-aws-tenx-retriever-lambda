@@ -19,7 +19,7 @@ locals {
     {
       "tenx-retriever-deploy"  = "lambda"
       terraform-module         = "tenx-retriever-lambda"
-      terraform-module-version = "v1.0.0"
+      terraform-module-version = "v1.0.1"
       managed-by               = "tenx-terraform"
     },
     var.tags,
@@ -138,6 +138,20 @@ resource "aws_iam_role_policy" "lambda_s3" {
 ############################################################
 
 locals {
+  # Engine `indexContainer` option, formatted as "<bucket>" or
+  # "<bucket>/<path>". The engine parses out the path and prepends it to
+  # every index artifact key it writes.
+  index_path_normalized = (
+    var.index_bucket_path == "" ? "" :
+    endswith(var.index_bucket_path, "/") ? trimsuffix(var.index_bucket_path, "/") :
+    var.index_bucket_path
+  )
+  index_container = (
+    local.index_path_normalized == ""
+    ? var.index_bucket_name
+    : "${var.index_bucket_name}/${local.index_path_normalized}"
+  )
+
   # Shared env for all Lambdas. Role-specific overrides merged in per-function.
   common_env = merge(
     {
@@ -146,7 +160,7 @@ locals {
       TENX_LOG_PATH                        = "/tmp/"
       JAVA_TOOL_OPTIONS                    = "-Djdk.httpclient.allowRestrictedHeaders=host"
       TENX_STREAMER_INPUT_BUCKET           = var.source_bucket_name
-      TENX_STREAMER_INDEX_BUCKET           = var.index_bucket_name
+      TENX_STREAMER_INDEX_BUCKET           = local.index_container
       TENX_INVOKE_PIPELINE_SCAN_ENDPOINT   = aws_sqs_queue.main["subquery"].url
       TENX_INVOKE_PIPELINE_STREAM_ENDPOINT = aws_sqs_queue.main["stream"].url
       TENX_QUARKUS_SUBQUERY_QUEUE_URL      = aws_sqs_queue.main["subquery"].url
@@ -161,14 +175,14 @@ locals {
   roles = {
     indexer = {
       description = "Retriever indexer — S3 event → byte-range + bloom + reverse index"
-      extra_env   = { ROLE = "indexer", INDEX_WRITE_BUCKET = var.source_bucket_name }
+      extra_env   = { ROLE = "indexer", INDEX_WRITE_BUCKET = local.index_container }
     }
     query = {
       description = "Retriever query-submit — HTTP → pipeline launch → SQS fan-out"
       extra_env = {
         ROLE                     = "query"
         QUERY_READ_BUCKET        = var.source_bucket_name
-        QUERY_INDEX_BUCKET       = var.source_bucket_name
+        QUERY_INDEX_BUCKET       = local.index_container
         QUERY_SUBQUERY_QUEUE_URL = aws_sqs_queue.main["subquery"].url
         QUERY_STREAM_QUEUE_URL   = aws_sqs_queue.main["stream"].url
       }
@@ -222,18 +236,15 @@ resource "aws_s3_bucket_notification" "source_to_index" {
 
   depends_on = [aws_sqs_queue_policy.index_s3]
 
-  # Recursion guard. The indexer Lambda writes bloom + reverse index
-  # artifacts back to the index bucket. If the same bucket is used for
-  # source + index AND the notification filter is wide open, each write
-  # re-triggers the indexer via SQS → Lambda → S3 → SQS → Lambda → …
-  # AWS's Lambda recursive-invocation detector eventually stops it, but
-  # by then a bill has accrued. Refuse this configuration at plan time.
-  # Escape hatch: set manage_s3_notification=false and wire the
-  # notification outside the module if you need a custom scope.
   lifecycle {
+    # When source and index share a bucket, index_bucket_path must be
+    # non-empty so engine writes land under a key prefix that does not
+    # overlap with the S3 -> SQS notification scope. Different buckets, or
+    # an externally-managed notification (manage_s3_notification=false),
+    # also satisfy this constraint.
     precondition {
-      condition     = var.source_bucket_name != var.index_bucket_name || var.source_prefix != ""
-      error_message = "Recursive-invocation risk: source_bucket_name == index_bucket_name with empty source_prefix means indexer writes re-trigger the indexer via the S3 notification. Set source_prefix to scope the trigger to where raw logs land (e.g. \"app/\", \"raw/\"), or use different buckets, or set manage_s3_notification=false to wire the notification yourself."
+      condition     = var.source_bucket_name != var.index_bucket_name || var.index_bucket_path != ""
+      error_message = "source_bucket_name == index_bucket_name requires a non-empty index_bucket_path (e.g. \"indexing-results/\") to keep engine writes outside the source notification scope. Alternatives: use different buckets, or set manage_s3_notification=false."
     }
   }
 }

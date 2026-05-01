@@ -18,6 +18,17 @@ variable "index_bucket_name" {
   type        = string
 }
 
+variable "index_bucket_path" {
+  description = <<-EOT
+    Path prefix within index_bucket_name under which the engine writes all
+    index artifacts (byte-range, reverse-index, bloom filters, templates,
+    query results). Trailing slash is optional. Required when
+    source_bucket_name equals index_bucket_name.
+  EOT
+  type        = string
+  default     = "indexing-results/"
+}
+
 variable "source_prefix" {
   description = "Optional S3 key prefix filter for the source bucket's ObjectCreated notifications. Scope to the directory that holds raw log uploads to avoid re-triggering on engine-written index files."
   type        = string

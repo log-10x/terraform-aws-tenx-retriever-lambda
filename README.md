@@ -42,6 +42,7 @@ module "retriever" {
   image_uri          = "${data.aws_caller_identity.current.account_id}.dkr.ecr.${var.region}.amazonaws.com/lambda-10x:1.0.13"
   source_bucket_name = "my-raw-log-bucket"
   index_bucket_name  = "my-raw-log-bucket" # same as source — EKS-style layout
+  index_bucket_path  = "indexing-results/" # required when source==index bucket; see Recursion guard
   tenx_api_key       = var.tenx_api_key
 
   source_prefix = "raw/"
@@ -87,24 +88,27 @@ image_uri = "<account>.dkr.ecr.<region>.amazonaws.com/lambda-10x:1.0.13"
 
 ## ⚠ Recursion guard
 
-When `source_bucket_name == index_bucket_name` (the single-bucket layout),
-`source_prefix` must scope the notification to where raw logs land — not
-to where the engine writes its index artifacts (under the `tenx/`
-prefix). Without a scoped prefix, the indexer's bloom/reverse-index
-writes re-trigger the S3 notification → indexer → write → loop. AWS's
-Lambda recursive-invocation detector stops it, but you'll still see
-unexpected invocations.
+When `source_bucket_name == index_bucket_name` (single-bucket layout),
+the engine's index writes must land under a key prefix that does not
+overlap with the S3 → SQS notification scope. Otherwise each engine
+write re-triggers the indexer via SQS → Lambda → S3 → SQS → … in a
+recursive loop.
 
-The module refuses this configuration at `terraform plan` time with:
+The module enforces this by requiring `index_bucket_path` to be non-empty
+in the single-bucket case. Engine writes are then prepended with that
+path (e.g. `indexing-results/tenx/<target>/r/...`), keeping them outside
+a sibling `source_prefix` like `raw/` or `app/`.
+
+The module refuses the unsafe configuration at `terraform plan` time:
 
 ```
-Recursive-invocation risk: source_bucket_name == index_bucket_name with
-empty source_prefix means indexer writes re-trigger the indexer via the
-S3 notification.
+source_bucket_name == index_bucket_name requires a non-empty
+index_bucket_path (e.g. "indexing-results/") to keep engine writes
+outside the source notification scope.
 ```
 
-Fixes:
-- Set `source_prefix` to the directory where raw uploads land (`app/`, `raw/`, etc.)
+Resolutions:
+- Set `index_bucket_path` to a path that doesn't overlap with `source_prefix` (the default `"indexing-results/"` is safe)
 - Or use separate buckets for `source_bucket_name` / `index_bucket_name`
 - Or set `manage_s3_notification = false` and wire the notification yourself (use the queue ARN from the module output)
 
