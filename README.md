@@ -172,6 +172,6 @@ itself is open source, **using Log10x requires a commercial license**.
 - A valid Log10x API key is required to run the deployed software
 
 **Get Started:**
-- [Log10x Pricing](https://log10x.com/pricing)
+- [Log10x Pricing](https://www.log10x.com/pricing?utm_source=github&utm_medium=readme&utm_campaign=terraform-aws-tenx-retriever-lambda&utm_content=footer)
 - [Documentation](https://doc.log10x.com)
 - [Contact Sales](mailto:sales@log10x.com)
