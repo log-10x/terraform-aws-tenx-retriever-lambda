@@ -1,6 +1,6 @@
 # terraform-aws-tenx-retriever-lambda
 
-Terraform module that deploys the Retriever to AWS Lambda as a
+Terraform module that deploys the [Log10x](https://www.log10x.com/?utm_source=github&utm_medium=readme&utm_campaign=terraform-aws-tenx-retriever-lambda&utm_content=hero) Retriever to AWS Lambda as a
 4-function fan-out topology. Sibling to the EKS-based
 [`terraform-aws-tenx-retriever`](https://registry.terraform.io/modules/log-10x/tenx-retriever/aws)
 module; pick one based on the deployment model you want.
