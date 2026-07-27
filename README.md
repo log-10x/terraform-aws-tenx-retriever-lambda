@@ -154,7 +154,7 @@ deploy/lambda/
 
 ## License
 
-This repository is licensed under the [Apache License 2.0](LICENSE).
+This repository is licensed under the [MIT License](LICENSE).
 
 ### Important: Log10x Product License Required
 
@@ -163,7 +163,7 @@ itself is open source, **using Log10x requires a commercial license**.
 
 | Component | License |
 |-----------|---------|
-| This repository (Terraform module) | Apache 2.0 (open source) |
+| This repository (Terraform module) | MIT (open source) |
 | Log10x engine and runtime | Commercial license required |
 
 **What this means:**
