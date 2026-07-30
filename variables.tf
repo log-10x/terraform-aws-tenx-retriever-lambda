@@ -8,6 +8,74 @@ variable "image_uri" {
   type        = string
 }
 
+variable "runtime_flavor" {
+  description = <<-EOT
+    Which retriever image `image_uri` points at.
+
+      jvm     lambda-10x:<version>          — shadow jar on the managed
+              public.ecr.aws/lambda/java:21 base, handler-dispatched
+              (com.log10x.ext.lambda.RetrieverHandler::handleRequest).
+              Multi-arch manifest, so either architecture resolves.
+
+      native  lambda-10x:<version>-native   — GraalVM binary named `bootstrap`
+              on public.ecr.aws/lambda/provided:al2023, driving the Lambda
+              Runtime API itself (RetrieverBootstrap). Single architecture per
+              tag; `architectures` must match the one it was compiled for.
+
+    Both are PackageType=Image, so this value changes tagging and the
+    architecture default only. It is documentation the deployed stack carries,
+    not a switch that can silently mis-deploy.
+  EOT
+  type        = string
+  default     = "jvm"
+  validation {
+    condition     = contains(["jvm", "native"], var.runtime_flavor)
+    error_message = "runtime_flavor must be \"jvm\" or \"native\"."
+  }
+}
+
+variable "architectures" {
+  description = <<-EOT
+    Instruction set for all four functions. Exactly one entry — Lambda accepts a
+    list but rejects more than one.
+
+    For runtime_flavor = "native" this must match the architecture the binary was
+    compiled for. A mismatch is not caught at plan or apply: CreateFunction
+    succeeds and the first invocation fails with an exec-format error.
+  EOT
+  type        = list(string)
+  default     = ["x86_64"]
+  validation {
+    condition = (
+      length(var.architectures) == 1 &&
+      contains(["x86_64", "arm64"], var.architectures[0])
+    )
+    error_message = "architectures must be exactly one of [\"x86_64\"] or [\"arm64\"]."
+  }
+}
+
+variable "image_entry_point" {
+  description = "Override the image's ENTRYPOINT. Leave empty to use the image's own — which is what both published flavors expect."
+  type        = list(string)
+  default     = []
+}
+
+variable "image_command" {
+  description = "Override the image's CMD. Leave empty to use the image's own: the handler string for the JVM flavor, an argv token the native bootstrap ignores."
+  type        = list(string)
+  default     = []
+}
+
+variable "ephemeral_storage_mb" {
+  description = "Size of /tmp in MB (512-10240). Null leaves the Lambda default of 512. Raise it when the stream role handles large blobs."
+  type        = number
+  default     = null
+  validation {
+    condition     = var.ephemeral_storage_mb == null || try(var.ephemeral_storage_mb >= 512 && var.ephemeral_storage_mb <= 10240, false)
+    error_message = "ephemeral_storage_mb must be between 512 and 10240, or null."
+  }
+}
+
 variable "source_bucket_name" {
   description = "Name of the S3 bucket where raw log objects land. Indexer reads from here. Must already exist."
   type        = string
