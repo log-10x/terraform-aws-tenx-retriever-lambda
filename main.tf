@@ -18,8 +18,9 @@ locals {
   common_tags = merge(
     {
       "tenx-retriever-deploy"  = "lambda"
+      "tenx-retriever-runtime" = var.runtime_flavor
       terraform-module         = "tenx-retriever-lambda"
-      terraform-module-version = "v1.0.1"
+      terraform-module-version = "v1.1.0"
       managed-by               = "tenx-terraform"
     },
     var.tags,
@@ -153,6 +154,15 @@ locals {
   )
 
   # Shared env for all Lambdas. Role-specific overrides merged in per-function.
+  #
+  # JAVA_TOOL_OPTIONS is set for BOTH runtime flavors and must stay that way.
+  # On the JVM flavor the launcher applies it. On the native flavor there is no
+  # launcher, so RetrieverBootstrap parses this variable itself in a static
+  # initialiser and calls System.setProperty for each -D. Dropping it because
+  # "a native image has no JVM" breaks the subquery role on every index range
+  # with `IllegalArgumentException: restricted header name: "host"` — the JDK
+  # HttpClient refuses a caller-supplied Host header unless the property allows
+  # it. One variable, two mechanisms, same value.
   common_env = merge(
     {
       TENX_HOME                            = "/var/task/tenx-home"
@@ -198,6 +208,18 @@ locals {
   }
 }
 
+# Both runtime flavors are PackageType=Image, so the Lambda resource itself is
+# almost flavor-agnostic: the java21-vs-provided.al2023 base, the handler-vs-
+# bootstrap dispatch and the CMD all live inside the image. `runtime` and
+# `handler` are unset for either flavor and must stay unset — setting them is
+# what CreateFunction rejects on an Image package.
+#
+# What is NOT flavor-agnostic is the architecture. The JVM image is a multi-arch
+# manifest, so Lambda picks the matching variant and x86_64 was safe to hardcode.
+# A native image is a single compiled binary: an amd64 `bootstrap` on an arm64
+# function fails at first invocation with an exec-format error, not at plan or
+# apply time. Hence architectures is now a variable the caller must line up with
+# the image it built.
 resource "aws_lambda_function" "role" {
   for_each = local.roles
 
@@ -206,9 +228,35 @@ resource "aws_lambda_function" "role" {
   role          = aws_iam_role.lambda.arn
   package_type  = "Image"
   image_uri     = var.image_uri
-  architectures = ["x86_64"]
+  architectures = var.architectures
   memory_size   = var.memory_size
   timeout       = var.timeout_seconds
+
+  # Only emitted when the caller overrides the image's own ENTRYPOINT/CMD.
+  # The stock images already carry the right one (the handler string for the
+  # JVM flavor, an ignored argv token for native), so this stays absent by
+  # default rather than pinning a value that belongs to the image.
+  dynamic "image_config" {
+    for_each = (
+      length(var.image_entry_point) > 0 || length(var.image_command) > 0
+      ? [1] : []
+    )
+    content {
+      entry_point = length(var.image_entry_point) > 0 ? var.image_entry_point : null
+      command     = length(var.image_command) > 0 ? var.image_command : null
+    }
+  }
+
+  # The stream role fetches blobs and decodes them through /tmp, which is also
+  # TENX_LOG_PATH. 512 MB is the Lambda default and the module's default; raise
+  # it when object sizes grow rather than discovering the limit as a mid-fetch
+  # "No space left on device".
+  dynamic "ephemeral_storage" {
+    for_each = var.ephemeral_storage_mb == null ? [] : [var.ephemeral_storage_mb]
+    content {
+      size = ephemeral_storage.value
+    }
+  }
 
   environment {
     variables = merge(local.common_env, each.value.extra_env)

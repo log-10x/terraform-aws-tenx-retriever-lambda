@@ -60,6 +60,30 @@ public.ecr.aws/x8r1y5t9/lambda-10x:<engine-version>
 
 Tags track the engine release. `1.0.13` is current; pin to a specific tag in production. The image is built from the engine's `pipeline/run-lambda/` module and tracks the matching `log10x/quarkus-10x` Docker Hub release.
 
+### Two runtime flavors
+
+Two images are published per engine release. Both are `PackageType=Image`, so the module deploys either one through the same `image_uri`; the difference lives entirely inside the image.
+
+| | `<version>` (JVM) | `<version>-native` |
+|---|---|---|
+| Base | `public.ecr.aws/lambda/java:21` | `public.ecr.aws/lambda/provided:al2023` |
+| Payload | `run-lambda-<version>-all.jar` | a compiled binary named `bootstrap` |
+| Dispatch | managed runtime calls `RetrieverHandler::handleRequest` | `RetrieverBootstrap` drives the Runtime API itself |
+| Architectures | multi-arch manifest — either value resolves | one architecture per tag |
+| Cold start | seconds | sub-second |
+
+Set `runtime_flavor` to record which one is deployed, and set `architectures` to match when it is `native`:
+
+```hcl
+runtime_flavor = "native"
+architectures  = ["x86_64"]
+image_uri      = "<acct>.dkr.ecr.us-east-1.amazonaws.com/lambda-10x:1.1.26-native"
+```
+
+An architecture mismatch on the native flavor is invisible until runtime. `CreateFunction` accepts it, `terraform apply` reports success, and the first invocation fails with an exec-format error.
+
+`JAVA_TOOL_OPTIONS` is set on both flavors and should stay that way. The native binary has no JVM launcher to read it, so `RetrieverBootstrap` parses the variable itself and applies each `-D` before the HTTP client initialises. Removing it as JVM-only leftovers breaks the subquery role on every index range with `restricted header name: "host"`.
+
 ### Lambda doesn't pull from ECR Public — mirror to private ECR
 
 AWS Lambda **only pulls container images from a private ECR repository in the same AWS account** as the function. The image must be mirrored from ECR Public to your account's ECR before the module can deploy:
@@ -140,6 +164,10 @@ is enough for mid-market query volumes.
 | `pipeline_shutdown_grace_ms` | 250 | Engine's sequencer-drain wait on pipeline close. Engine default (5000) adds a flat 5 s to warm Lambda invocations because sequencer queues are already empty by close time. 250 ms safely bounds the wait; override upward only if observing dropped events on a high-throughput long-running workload. |
 | `indexer_batch_size` | 1 | SQS batch size for the indexer. 1 is safest (ordered, no redelivery). Increase to trade latency for throughput under backlog. |
 | `enable_query_url` | true | Lambda Function URL exposing `POST /retriever/query`. Cheaper and simpler than API Gateway. Set to false if fronting with API GW for custom auth/routing. |
+| `runtime_flavor` | `"jvm"` | Which image `image_uri` points at — `jvm` or `native`. Sets the `tenx-retriever-runtime` tag on every resource so the deployed flavor is readable without inspecting the image. |
+| `architectures` | `["x86_64"]` | Exactly one of `["x86_64"]` or `["arm64"]`. Must match the compiled binary on the native flavor. |
+| `ephemeral_storage_mb` | null | Size of `/tmp`. Null keeps Lambda's 512 MB. The stream role stages fetched blobs there. |
+| `image_entry_point` / `image_command` | `[]` | Override the image's ENTRYPOINT/CMD. Both published flavors already carry the right one; leave empty. |
 
 ## File layout
 
