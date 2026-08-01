@@ -20,7 +20,7 @@ locals {
       "tenx-retriever-deploy"  = "lambda"
       "tenx-retriever-runtime" = var.runtime_flavor
       terraform-module         = "tenx-retriever-lambda"
-      terraform-module-version = "v1.1.0"
+      terraform-module-version = "v1.2.0"
       managed-by               = "tenx-terraform"
     },
     var.tags,
