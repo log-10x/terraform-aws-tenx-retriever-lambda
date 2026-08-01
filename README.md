@@ -80,6 +80,30 @@ architectures  = ["x86_64"]
 image_uri      = "<acct>.dkr.ecr.us-east-1.amazonaws.com/lambda-10x:1.1.26-native"
 ```
 
+`runtime_flavor` and `image_uri` are cross-checked at plan time by
+`terraform_data.flavor_gate`. Declaring one flavor while pointing at the other
+used to plan clean, apply clean, and fail at first invocation, leaving a
+`tenx-retriever-runtime` tag that said the opposite of the truth. Now it stops
+at `terraform plan`:
+
+```
+Error: Resource precondition failed
+  runtime_flavor = "native" contradicts the image_uri tag "1.1.32".
+```
+
+The check reads the flavor off the tag suffix, which is the convention the
+published images follow — `<version>-native` for native, `<version>` for jvm. A
+tagless `image_uri` and a digest-pinned one both fail too, the first because
+`:latest` is a different image on every deploy, the second because a digest
+names no flavor. If you retag into your own registry under a different
+convention, set `allow_flavor_tag_mismatch = true` and accept that
+`runtime_flavor` is then unverified.
+
+This is a plan-time precondition rather than a variable `validation` block
+because Terraform only lets a variable validation reference its own variable.
+`terraform validate` still passes on a mismatch; `terraform plan` is the
+earliest point where the two values can be compared.
+
 An architecture mismatch on the native flavor is invisible until runtime. `CreateFunction` accepts it, `terraform apply` reports success, and the first invocation fails with an exec-format error.
 
 `JAVA_TOOL_OPTIONS` is set on both flavors and should stay that way. The native binary has no JVM launcher to read it, so `RetrieverBootstrap` parses the variable itself and applies each `-D` before the HTTP client initialises. Removing it as JVM-only leftovers breaks the subquery role on every index range with `restricted header name: "host"`.
@@ -164,7 +188,8 @@ is enough for mid-market query volumes.
 | `pipeline_shutdown_grace_ms` | 250 | Engine's sequencer-drain wait on pipeline close. Engine default (5000) adds a flat 5 s to warm Lambda invocations because sequencer queues are already empty by close time. 250 ms safely bounds the wait; override upward only if observing dropped events on a high-throughput long-running workload. |
 | `indexer_batch_size` | 1 | SQS batch size for the indexer. 1 is safest (ordered, no redelivery). Increase to trade latency for throughput under backlog. |
 | `enable_query_url` | true | Lambda Function URL exposing `POST /retriever/query`. Cheaper and simpler than API Gateway. Set to false if fronting with API GW for custom auth/routing. |
-| `runtime_flavor` | `"jvm"` | Which image `image_uri` points at — `jvm` or `native`. Sets the `tenx-retriever-runtime` tag on every resource so the deployed flavor is readable without inspecting the image. |
+| `runtime_flavor` | `"jvm"` | Which image `image_uri` points at — `jvm` or `native`. Sets the `tenx-retriever-runtime` tag on every resource so the deployed flavor is readable without inspecting the image, and is cross-checked against the `image_uri` tag at plan time. |
+| `allow_flavor_tag_mismatch` | false | Escape hatch for that cross-check. Set true for a digest-pinned `image_uri`, or a retag into a registry that does not use the `-native` suffix. `runtime_flavor` is then unverified. |
 | `architectures` | `["x86_64"]` | Exactly one of `["x86_64"]` or `["arm64"]`. Must match the compiled binary on the native flavor. |
 | `ephemeral_storage_mb` | null | Size of `/tmp`. Null keeps Lambda's 512 MB. The stream role stages fetched blobs there. |
 | `image_entry_point` / `image_command` | `[]` | Override the image's ENTRYPOINT/CMD. Both published flavors already carry the right one; leave empty. |
