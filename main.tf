@@ -20,11 +20,100 @@ locals {
       "tenx-retriever-deploy"  = "lambda"
       "tenx-retriever-runtime" = var.runtime_flavor
       terraform-module         = "tenx-retriever-lambda"
-      terraform-module-version = "v1.1.0"
+      terraform-module-version = "v1.2.0"
       managed-by               = "tenx-terraform"
     },
     var.tags,
   )
+}
+
+############################################################
+# runtime_flavor ↔ image_uri gate
+############################################################
+# runtime_flavor used to be checked for membership only (jvm | native) and was
+# then consumed exactly once, as a tag. Nothing correlated it with the image the
+# module actually deploys, so `runtime_flavor = "native"` against the JVM tag
+# planned clean and applied clean; the only record of what was deployed was a
+# tag that said the opposite of the truth, and the four functions failed at
+# first invocation rather than at plan.
+#
+# The two images are not interchangeable. The JVM one is a shadow jar on
+# public.ecr.aws/lambda/java:21, handler-dispatched, multi-arch. The native one
+# is a GraalVM `bootstrap` on provided:al2023 driving the Runtime API itself,
+# single-architecture per tag. Published native tags carry a `-native` suffix;
+# JVM tags do not. That suffix is the only flavor evidence available offline, so
+# it is what the gate keys on.
+#
+# A `validation` block cannot do this: Terraform only lets a variable validation
+# reference its own variable, so the cross-check has to be a plan-time
+# precondition. `terraform validate` therefore still passes on a mismatch;
+# `terraform plan` is where it fails. That is the earliest point at which
+# Terraform will evaluate two variables against each other.
+locals {
+  # A digest-pinned reference (…@sha256:<64 hex>) carries no tag, so nothing in
+  # it names a flavor. Detect it first, otherwise the digest hex parses as a tag.
+  image_is_digest_pinned = can(regex("@sha256:[0-9a-f]{64}$", var.image_uri))
+
+  # Last colon-delimited segment, rejecting a registry port (`host:5000/repo`
+  # has a `/` after the colon, so it does not match).
+  image_tag = (
+    local.image_is_digest_pinned
+    ? null
+    : try(regex(":([^:/@]+)$", var.image_uri)[0], null)
+  )
+
+  image_tag_says_native = local.image_tag == null ? null : can(regex("(^|[-._])native$", local.image_tag))
+}
+
+resource "terraform_data" "flavor_gate" {
+  input = {
+    runtime_flavor = var.runtime_flavor
+    image_tag      = local.image_tag
+  }
+
+  lifecycle {
+    precondition {
+      condition = (
+        local.image_is_digest_pinned ||
+        local.image_tag != null ||
+        var.allow_flavor_tag_mismatch
+      )
+      error_message = <<-EOT
+        image_uri "${var.image_uri}" carries neither a tag nor a @sha256 digest.
+        A tagless reference resolves to :latest at pull time, which is a
+        different image on every deploy and names no flavor. Pin a tag
+        (lambda-10x:<version> for jvm, lambda-10x:<version>-native for native)
+        or a digest.
+      EOT
+    }
+
+    precondition {
+      condition     = !local.image_is_digest_pinned || var.allow_flavor_tag_mismatch
+      error_message = <<-EOT
+        image_uri is digest-pinned, so runtime_flavor = "${var.runtime_flavor}"
+        cannot be cross-checked against it: a digest names no flavor. Either pin
+        the tag instead, or set allow_flavor_tag_mismatch = true to accept the
+        reference unverified.
+      EOT
+    }
+
+    precondition {
+      condition = (
+        var.allow_flavor_tag_mismatch ||
+        local.image_tag == null ||
+        local.image_tag_says_native == (var.runtime_flavor == "native")
+      )
+      error_message = <<-EOT
+        runtime_flavor = "${var.runtime_flavor}" contradicts the image_uri tag "${coalesce(local.image_tag, "(none)")}".
+        The native retriever image is tagged <version>-native and runs a GraalVM
+        bootstrap on provided:al2023; the JVM one is tagged <version> and is
+        handler-dispatched on lambda/java:21. Deploying one while declaring the
+        other plans and applies clean, then fails at first invocation.
+        Fix whichever is wrong, or set allow_flavor_tag_mismatch = true if you
+        retag these images into your own registry under a different convention.
+      EOT
+    }
+  }
 }
 
 ############################################################

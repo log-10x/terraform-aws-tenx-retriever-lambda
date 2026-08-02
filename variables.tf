@@ -23,8 +23,10 @@ variable "runtime_flavor" {
               tag; `architectures` must match the one it was compiled for.
 
     Both are PackageType=Image, so this value changes tagging and the
-    architecture default only. It is documentation the deployed stack carries,
-    not a switch that can silently mis-deploy.
+    architecture default only. Membership is checked here; agreement with the
+    image `image_uri` actually points at is checked at plan time by
+    terraform_data.flavor_gate in main.tf, because a variable validation may
+    only reference its own variable.
   EOT
   type        = string
   default     = "jvm"
@@ -32,6 +34,21 @@ variable "runtime_flavor" {
     condition     = contains(["jvm", "native"], var.runtime_flavor)
     error_message = "runtime_flavor must be \"jvm\" or \"native\"."
   }
+}
+
+variable "allow_flavor_tag_mismatch" {
+  description = <<-EOT
+    Escape hatch for terraform_data.flavor_gate. The gate reads the flavor off
+    the image_uri tag suffix, which is the convention the published images
+    follow (`<version>-native` for native, `<version>` for jvm). Set true when
+    that convention does not apply to your reference — a digest-pinned URI, or
+    a retag into your own registry under different naming — and you accept that
+    runtime_flavor is then unverified. Leave false everywhere else: it is the
+    only thing standing between a wrong runtime_flavor and a stack that plans
+    clean, applies clean, and fails at first invocation.
+  EOT
+  type        = bool
+  default     = false
 }
 
 variable "architectures" {
