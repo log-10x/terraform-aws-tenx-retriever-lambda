@@ -35,7 +35,7 @@ module; pick one based on the deployment model you want.
 ```hcl
 module "retriever" {
   source  = "log-10x/tenx-retriever-lambda/aws"
-  version = "~> 1.0"
+  version = "~> 2.0"
 
   name_prefix        = "my-retriever"
   # Must be a private ECR URI in the same AWS account as the Lambda — see Image section below.
@@ -60,11 +60,11 @@ public.ecr.aws/x8r1y5t9/lambda-10x:<engine-version>
 
 Tags track the engine release. `1.0.13` is current; pin to a specific tag in production. The image is built from the engine's `pipeline/run-lambda/` module and tracks the matching `log10x/quarkus-10x` Docker Hub release.
 
-### Two runtime flavors
+### Two Lambda packagings
 
 Two images are published per engine release. Both are `PackageType=Image`, so the module deploys either one through the same `image_uri`; the difference lives entirely inside the image.
 
-| | `<version>` (JVM) | `<version>-native` |
+| | `<version>` (jvm) | `<version>-native` |
 |---|---|---|
 | Base | `public.ecr.aws/lambda/java:21` | `public.ecr.aws/lambda/provided:al2023` |
 | Payload | `run-lambda-<version>-all.jar` | a compiled binary named `bootstrap` |
@@ -72,41 +72,55 @@ Two images are published per engine release. Both are `PackageType=Image`, so th
 | Architectures | multi-arch manifest — either value resolves | one architecture per tag |
 | Cold start | seconds | sub-second |
 
-Set `runtime_flavor` to record which one is deployed, and set `architectures` to match when it is `native`:
+Set `lambda_packaging` to record which one is deployed, and set `architectures` to match when it is `native`:
 
 ```hcl
-runtime_flavor = "native"
-architectures  = ["x86_64"]
-image_uri      = "<acct>.dkr.ecr.us-east-1.amazonaws.com/lambda-10x:1.1.26-native"
+lambda_packaging = "native"
+architectures    = ["x86_64"]
+image_uri        = "<acct>.dkr.ecr.us-east-1.amazonaws.com/lambda-10x:1.1.26-native"
 ```
 
-`runtime_flavor` and `image_uri` are cross-checked at plan time by
-`terraform_data.flavor_gate`. Declaring one flavor while pointing at the other
-used to plan clean, apply clean, and fail at first invocation, leaving a
-`tenx-retriever-runtime` tag that said the opposite of the truth. Now it stops
-at `terraform plan`:
+`lambda_packaging` and `image_uri` are cross-checked at plan time by
+`terraform_data.packaging_gate`. Declaring one packaging while pointing at the
+other used to plan clean, apply clean, and fail at first invocation, leaving a
+tag that said the opposite of the truth. Now it stops at `terraform plan`:
 
 ```
 Error: Resource precondition failed
-  runtime_flavor = "native" contradicts the image_uri tag "1.1.32".
+  lambda_packaging = "native" contradicts the image_uri tag "1.1.32".
 ```
 
-The check reads the flavor off the tag suffix, which is the convention the
+The check reads the packaging off the tag suffix, which is the convention the
 published images follow — `<version>-native` for native, `<version>` for jvm. A
 tagless `image_uri` and a digest-pinned one both fail too, the first because
 `:latest` is a different image on every deploy, the second because a digest
-names no flavor. If you retag into your own registry under a different
-convention, set `allow_flavor_tag_mismatch = true` and accept that
-`runtime_flavor` is then unverified.
+names no packaging. If you retag into your own registry under a different
+convention, set `allow_packaging_tag_mismatch = true` and accept that
+`lambda_packaging` is then unverified.
 
 This is a plan-time precondition rather than a variable `validation` block
 because Terraform only lets a variable validation reference its own variable.
 `terraform validate` still passes on a mismatch; `terraform plan` is the
 earliest point where the two values can be compared.
 
-An architecture mismatch on the native flavor is invisible until runtime. `CreateFunction` accepts it, `terraform apply` reports success, and the first invocation fails with an exec-format error.
+An architecture mismatch on the native packaging is invisible until runtime. `CreateFunction` accepts it, `terraform apply` reports success, and the first invocation fails with an exec-format error.
 
-`JAVA_TOOL_OPTIONS` is set on both flavors and should stay that way. The native binary has no JVM launcher to read it, so `RetrieverBootstrap` parses the variable itself and applies each `-D` before the HTTP client initialises. Removing it as JVM-only leftovers breaks the subquery role on every index range with `restricted header name: "host"`.
+`JAVA_TOOL_OPTIONS` is set on both packagings and should stay that way. The native binary has no JVM launcher to read it, so `RetrieverBootstrap` parses the variable itself and applies each `-D` before the HTTP client initialises. Removing it as JVM-only leftovers breaks the subquery role on every index range with `restricted header name: "host"`.
+
+### Why "packaging" and not "flavor"
+
+`jvm` and `native` say how the retriever is built into a Lambda container
+image. They do not name an engine distribution. Log10x ships two distributions
+— the compiler (container/JVM) and the runtime (a native binary) — and the
+retriever is neither: it is an application, the same class of thing as the
+reporter or the receiver, and it runs on Lambda regardless of which
+distribution produced its jar or binary. Under the old name,
+`runtime_flavor = "jvm"` read as "the runtime distribution, in its JVM
+variant", which is not a thing that exists.
+
+The rename lands in v2.0.0 because Terraform has no variable aliasing: there is
+no deprecation window in which both names work. See
+[Upgrading from v1.x](#upgrading-from-v1x).
 
 ### Lambda doesn't pull from ECR Public — mirror to private ECR
 
@@ -133,6 +147,32 @@ Then pass the private-ECR URI to `image_uri`:
 ```hcl
 image_uri = "<account>.dkr.ecr.<region>.amazonaws.com/lambda-10x:1.0.13"
 ```
+
+## Upgrading from v1.x
+
+v2.0.0 renames one input, one escape hatch and one tag key. Nothing else about
+the deployed stack changes.
+
+| v1.x | v2.0.0 |
+|---|---|
+| `runtime_flavor` | `lambda_packaging` |
+| `allow_flavor_tag_mismatch` | `allow_packaging_tag_mismatch` |
+| `tenx-retriever-runtime` tag | `tenx-retriever-packaging` tag |
+| `terraform_data.flavor_gate` | `terraform_data.packaging_gate` |
+
+Terraform has no variable aliasing, so both old names are hard errors from
+`terraform validate` onward after the bump:
+
+```
+Error: Unsupported argument
+  An argument named "runtime_flavor" is not expected here.
+```
+
+Rename the arguments at your call site and re-plan. Expect one in-place tag
+update per resource (the old key is dropped, the new one added); no function,
+queue or role is replaced. The gate resource rename is covered by a `moved`
+block in the module, so existing state is carried across rather than
+destroyed and recreated.
 
 ## ⚠ Recursion guard
 
@@ -188,11 +228,11 @@ is enough for mid-market query volumes.
 | `pipeline_shutdown_grace_ms` | 250 | Engine's sequencer-drain wait on pipeline close. Engine default (5000) adds a flat 5 s to warm Lambda invocations because sequencer queues are already empty by close time. 250 ms safely bounds the wait; override upward only if observing dropped events on a high-throughput long-running workload. |
 | `indexer_batch_size` | 1 | SQS batch size for the indexer. 1 is safest (ordered, no redelivery). Increase to trade latency for throughput under backlog. |
 | `enable_query_url` | true | Lambda Function URL exposing `POST /retriever/query`. Cheaper and simpler than API Gateway. Set to false if fronting with API GW for custom auth/routing. |
-| `runtime_flavor` | `"jvm"` | Which image `image_uri` points at — `jvm` or `native`. Sets the `tenx-retriever-runtime` tag on every resource so the deployed flavor is readable without inspecting the image, and is cross-checked against the `image_uri` tag at plan time. |
-| `allow_flavor_tag_mismatch` | false | Escape hatch for that cross-check. Set true for a digest-pinned `image_uri`, or a retag into a registry that does not use the `-native` suffix. `runtime_flavor` is then unverified. |
-| `architectures` | `["x86_64"]` | Exactly one of `["x86_64"]` or `["arm64"]`. Must match the compiled binary on the native flavor. |
+| `lambda_packaging` | `"jvm"` | Which image `image_uri` points at — `jvm` or `native`. Sets the `tenx-retriever-packaging` tag on every resource so the deployed packaging is readable without inspecting the image, and is cross-checked against the `image_uri` tag at plan time. |
+| `allow_packaging_tag_mismatch` | false | Escape hatch for that cross-check. Set true for a digest-pinned `image_uri`, or a retag into a registry that does not use the `-native` suffix. `lambda_packaging` is then unverified. |
+| `architectures` | `["x86_64"]` | Exactly one of `["x86_64"]` or `["arm64"]`. Must match the compiled binary on the native packaging. |
 | `ephemeral_storage_mb` | null | Size of `/tmp`. Null keeps Lambda's 512 MB. The stream role stages fetched blobs there. |
-| `image_entry_point` / `image_command` | `[]` | Override the image's ENTRYPOINT/CMD. Both published flavors already carry the right one; leave empty. |
+| `image_entry_point` / `image_command` | `[]` | Override the image's ENTRYPOINT/CMD. Both published images already carry the right one; leave empty. |
 
 ## File layout
 
