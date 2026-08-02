@@ -26,7 +26,7 @@ module; pick one based on the deployment model you want.
   and attaches the notification + IAM policy. This is intentional —
   bucket ownership is typically a longer-lived concern than the
   compute layer.
-- **The ECR image.** Pull the published image from `public.ecr.aws/x8r1y5t9/lambda-10x:<tag>` (see [Image](#image) below). Pass the URI via `image_uri`. To roll your own from source, build `pipeline/run-lambda/` in the engine repo and push to your own ECR.
+- **The ECR image.** Pull the published image from `docker.io/log10x/lambda-10x:<tag>` or `ghcr.io/log-10x/lambda-10x:<tag>`, mirror it into your account's private ECR, and pass that URI via `image_uri` (see [Image](#image) below). To roll your own from source, build `pipeline/run-lambda/` in the engine repo and push to your own ECR.
 - **Provisioned concurrency.** Add outside this module if you need
   warm-always guarantees for the query hot path.
 
@@ -35,11 +35,13 @@ module; pick one based on the deployment model you want.
 ```hcl
 module "retriever" {
   source  = "log-10x/tenx-retriever-lambda/aws"
-  version = "~> 2.0"
+  version = "~> 3.0"
 
-  name_prefix        = "my-retriever"
+  name_prefix = "my-retriever"
   # Must be a private ECR URI in the same AWS account as the Lambda — see Image section below.
-  image_uri          = "${data.aws_caller_identity.current.account_id}.dkr.ecr.${var.region}.amazonaws.com/lambda-10x:1.0.13"
+  # lambda_packaging defaults to "native", so the tag carries the -native suffix
+  # and architectures stays at its ["x86_64"] default. Nothing else to set.
+  image_uri          = "${data.aws_caller_identity.current.account_id}.dkr.ecr.${var.region}.amazonaws.com/lambda-10x:1.1.38-native"
   source_bucket_name = "my-raw-log-bucket"
   index_bucket_name  = "my-raw-log-bucket" # same as source — EKS-style layout
   index_bucket_path  = "indexing-results/" # required when source==index bucket; see Recursion guard
@@ -52,32 +54,48 @@ module "retriever" {
 
 ## Image
 
-The official Lambda runtime image is published to AWS ECR Public:
+The Lambda images are published to Docker Hub and GHCR:
 
 ```
-public.ecr.aws/x8r1y5t9/lambda-10x:<engine-version>
+docker.io/log10x/lambda-10x:<engine-version>-native   ← default packaging
+ghcr.io/log-10x/lambda-10x:<engine-version>-native
 ```
 
-Tags track the engine release. `1.0.13` is current; pin to a specific tag in production. The image is built from the engine's `pipeline/run-lambda/` module and tracks the matching `log10x/quarkus-10x` Docker Hub release.
+Tags track the engine release; `1.1.38` is current. Pin a tag — never rely on
+`:latest`, which the module rejects at plan time anyway.
+
+> The ECR Public mirror at `public.ecr.aws/x8r1y5t9/lambda-10x` is **stale**: its
+> newest tag is `1.0.13` and it carries no `-native` tag at all. Pull from Docker
+> Hub or GHCR. (Verified 2026-08-02 against the ECR Public gallery API, which
+> lists only `0.21.0*`, `1.0.13`, `latest*`.)
 
 ### Two Lambda packagings
 
 Two images are published per engine release. Both are `PackageType=Image`, so the module deploys either one through the same `image_uri`; the difference lives entirely inside the image.
 
-| | `<version>` (jvm) | `<version>-native` |
+| | `<version>-native` (**default**) | `<version>` (jvm) |
 |---|---|---|
-| Base | `public.ecr.aws/lambda/java:21` | `public.ecr.aws/lambda/provided:al2023` |
-| Payload | `run-lambda-<version>-all.jar` | a compiled binary named `bootstrap` |
-| Dispatch | managed runtime calls `RetrieverHandler::handleRequest` | `RetrieverBootstrap` drives the Runtime API itself |
-| Architectures | multi-arch manifest — either value resolves | one architecture per tag |
-| Cold start | seconds | sub-second |
+| Base | `public.ecr.aws/lambda/provided:al2023` | `public.ecr.aws/lambda/java:21` |
+| Payload | a compiled binary named `bootstrap` | `run-lambda-<version>-all.jar` |
+| Dispatch | `RetrieverBootstrap` drives the Runtime API itself | managed runtime calls `RetrieverHandler::handleRequest` |
+| Architectures | `x86_64` only — single-arch tag, built `linux/amd64` | multi-arch manifest, either value resolves |
+| Cold start | sub-second | seconds |
 
-Set `lambda_packaging` to record which one is deployed, and set `architectures` to match when it is `native`:
+`lambda_packaging` defaults to `"native"` and `architectures` defaults to
+`["x86_64"]`, which is the pairing the published native tag requires. A call
+site that wants the default packaging sets neither:
 
 ```hcl
-lambda_packaging = "native"
-architectures    = ["x86_64"]
-image_uri        = "<acct>.dkr.ecr.us-east-1.amazonaws.com/lambda-10x:1.1.26-native"
+image_uri = "<acct>.dkr.ecr.us-east-1.amazonaws.com/lambda-10x:1.1.38-native"
+```
+
+Deploying the JVM packaging is now the explicit case — and the only way to run
+the retriever on `arm64`, since the published native tag is amd64-only:
+
+```hcl
+lambda_packaging = "jvm"
+architectures    = ["arm64"]                                                # or ["x86_64"]
+image_uri        = "<acct>.dkr.ecr.us-east-1.amazonaws.com/lambda-10x:1.1.38"
 ```
 
 `lambda_packaging` and `image_uri` are cross-checked at plan time by
@@ -103,7 +121,12 @@ because Terraform only lets a variable validation reference its own variable.
 `terraform validate` still passes on a mismatch; `terraform plan` is the
 earliest point where the two values can be compared.
 
-An architecture mismatch on the native packaging is invisible until runtime. `CreateFunction` accepts it, `terraform apply` reports success, and the first invocation fails with an exec-format error.
+An architecture mismatch on the native packaging is invisible until runtime, and
+the gate above cannot catch it: a tag names the packaging but says nothing about
+the architecture. `CreateFunction` accepts `["arm64"]` against an amd64
+`bootstrap`, `terraform apply` reports success, and the first invocation fails
+with an exec-format error. Leaving `architectures` at its `["x86_64"]` default is
+what keeps the default packaging correct — do not change one without the other.
 
 `JAVA_TOOL_OPTIONS` is set on both packagings and should stay that way. The native binary has no JVM launcher to read it, so `RetrieverBootstrap` parses the variable itself and applies each `-D` before the HTTP client initialises. Removing it as JVM-only leftovers breaks the subquery role on every index range with `restricted header name: "host"`.
 
@@ -129,24 +152,63 @@ AWS Lambda **only pulls container images from a private ECR repository in the sa
 ```
 REGION=us-east-1
 ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
+TAG=1.1.38-native
 
 aws ecr create-repository --repository-name lambda-10x --region $REGION
 
-docker pull public.ecr.aws/x8r1y5t9/lambda-10x:1.0.13
-docker tag  public.ecr.aws/x8r1y5t9/lambda-10x:1.0.13 \
-            ${ACCOUNT}.dkr.ecr.${REGION}.amazonaws.com/lambda-10x:1.0.13
+# --platform linux/amd64 matters on an arm64 workstation: the native tag has no
+# arm64 variant to fall back to, and a silent emulated pull would push an image
+# Lambda cannot run.
+docker pull --platform linux/amd64 docker.io/log10x/lambda-10x:${TAG}
+docker tag  docker.io/log10x/lambda-10x:${TAG} \
+            ${ACCOUNT}.dkr.ecr.${REGION}.amazonaws.com/lambda-10x:${TAG}
 
 aws ecr get-login-password --region $REGION | docker login --username AWS \
   --password-stdin ${ACCOUNT}.dkr.ecr.${REGION}.amazonaws.com
 
-docker push ${ACCOUNT}.dkr.ecr.${REGION}.amazonaws.com/lambda-10x:1.0.13
+docker push ${ACCOUNT}.dkr.ecr.${REGION}.amazonaws.com/lambda-10x:${TAG}
 ```
 
 Then pass the private-ECR URI to `image_uri`:
 
 ```hcl
-image_uri = "<account>.dkr.ecr.<region>.amazonaws.com/lambda-10x:1.0.13"
+image_uri = "<account>.dkr.ecr.<region>.amazonaws.com/lambda-10x:1.1.38-native"
 ```
+
+## Upgrading from v2.x
+
+v3.0.0 changes one default and nothing else:
+
+| | v2.0.0 | v3.0.0 |
+|---|---|---|
+| `lambda_packaging` default | `"jvm"` | `"native"` |
+| `architectures` default | `["x86_64"]` | `["x86_64"]` (unchanged, now load-bearing) |
+
+No variable is renamed, added or removed. Call sites that already set
+`lambda_packaging` explicitly are unaffected.
+
+A call site that relied on the old default and points at a JVM tag **fails at
+`terraform plan`**, by design — the packaging gate is what makes this a loud
+break instead of four functions that apply clean and die on first invocation:
+
+```
+Error: Resource precondition failed
+  lambda_packaging = "native" contradicts the image_uri tag "1.1.38".
+```
+
+Two ways forward:
+
+- **Keep the JVM packaging.** Add `lambda_packaging = "jvm"` at the call site.
+  The plan goes clean again and the only diff is the `tenx-retriever-packaging`
+  tag value, which was already `jvm`.
+- **Move to native** (recommended). Mirror `lambda-10x:<version>-native` into
+  your private ECR, point `image_uri` at it, and leave `architectures` at
+  `["x86_64"]`. The plan shows an in-place `image_uri` update on all four
+  functions; no queue, role or function is replaced.
+
+Only the second path changes what runs. Cold start drops from seconds to
+sub-second; warm behaviour is identical, since both images carry the same engine
+code.
 
 ## Upgrading from v1.x
 
@@ -228,21 +290,20 @@ is enough for mid-market query volumes.
 | `pipeline_shutdown_grace_ms` | 250 | Engine's sequencer-drain wait on pipeline close. Engine default (5000) adds a flat 5 s to warm Lambda invocations because sequencer queues are already empty by close time. 250 ms safely bounds the wait; override upward only if observing dropped events on a high-throughput long-running workload. |
 | `indexer_batch_size` | 1 | SQS batch size for the indexer. 1 is safest (ordered, no redelivery). Increase to trade latency for throughput under backlog. |
 | `enable_query_url` | true | Lambda Function URL exposing `POST /retriever/query`. Cheaper and simpler than API Gateway. Set to false if fronting with API GW for custom auth/routing. |
-| `lambda_packaging` | `"jvm"` | Which image `image_uri` points at — `jvm` or `native`. Sets the `tenx-retriever-packaging` tag on every resource so the deployed packaging is readable without inspecting the image, and is cross-checked against the `image_uri` tag at plan time. |
+| `lambda_packaging` | `"native"` | Which image `image_uri` points at — `native` (GraalVM `bootstrap`, sub-second cold start) or `jvm`. Sets the `tenx-retriever-packaging` tag on every resource so the deployed packaging is readable without inspecting the image, and is cross-checked against the `image_uri` tag at plan time. |
 | `allow_packaging_tag_mismatch` | false | Escape hatch for that cross-check. Set true for a digest-pinned `image_uri`, or a retag into a registry that does not use the `-native` suffix. `lambda_packaging` is then unverified. |
-| `architectures` | `["x86_64"]` | Exactly one of `["x86_64"]` or `["arm64"]`. Must match the compiled binary on the native packaging. |
+| `architectures` | `["x86_64"]` | Exactly one of `["x86_64"]` or `["arm64"]`. The published native tag is amd64-only, so this default is the one the default packaging requires. `["arm64"]` is reachable only via `lambda_packaging = "jvm"` or a self-compiled arm64 binary. |
 | `ephemeral_storage_mb` | null | Size of `/tmp`. Null keeps Lambda's 512 MB. The stream role stages fetched blobs there. |
 | `image_entry_point` / `image_command` | `[]` | Override the image's ENTRYPOINT/CMD. Both published images already carry the right one; leave empty. |
 
 ## File layout
 
 ```
-deploy/lambda/
-  main.tf         ← resources (Lambdas, SQS, IAM, triggers)
-  variables.tf    ← inputs
-  outputs.tf      ← outputs
-  versions.tf     ← provider constraints
-  README.md       ← this file
+main.tf         ← resources (Lambdas, SQS, IAM, triggers) + the packaging gate
+variables.tf    ← inputs
+outputs.tf      ← outputs
+versions.tf     ← provider constraints
+README.md       ← this file
 ```
 
 ## License

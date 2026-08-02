@@ -8,9 +8,9 @@
 #   - S3 event notification wiring (source bucket → index queue)
 #   - CloudWatch log groups (implicit via Lambda)
 #
-# The source and index S3 buckets are BYO: caller either creates them
-# before calling this module (recommended for production) or supplies
-# names of buckets to create. See examples/ for both patterns.
+# The source and index S3 buckets are BYO: they must exist before this
+# module is called. See the README's Usage and Recursion guard sections
+# for the single-bucket and two-bucket layouts.
 ############################################################
 
 locals {
@@ -24,7 +24,7 @@ locals {
       # application; jvm-vs-native is how its Lambda image is packaged.
       "tenx-retriever-packaging" = var.lambda_packaging
       terraform-module           = "tenx-retriever-lambda"
-      terraform-module-version   = "v2.0.0"
+      terraform-module-version   = "v3.0.0"
       managed-by                 = "tenx-terraform"
     },
     var.tags,
@@ -321,8 +321,15 @@ locals {
 # manifest, so Lambda picks the matching variant and x86_64 was safe to hardcode.
 # A native image is a single compiled binary: an amd64 `bootstrap` on an arm64
 # function fails at first invocation with an exec-format error, not at plan or
-# apply time. Hence architectures is now a variable the caller must line up with
-# the image it built.
+# apply time. Hence architectures is a variable the caller must line up with the
+# image it deploys.
+#
+# The two defaults are chosen together. lambda_packaging defaults to "native"
+# and architectures defaults to ["x86_64"] because the published
+# lambda-10x:<version>-native tag is linux/amd64 and nothing else. Changing one
+# default without the other produces a stack that plans, applies, and then dies
+# on its first invocation, which is the failure mode this module spent two
+# releases pushing back to plan time.
 resource "aws_lambda_function" "role" {
   for_each = local.roles
 

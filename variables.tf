@@ -4,7 +4,20 @@ variable "name_prefix" {
 }
 
 variable "image_uri" {
-  description = "Full ECR image URI for the retriever Lambda container (e.g. 123.dkr.ecr.us-east-1.amazonaws.com/tenx-retriever-lambda:1.0.0)."
+  description = <<-EOT
+    Full private-ECR image URI for the retriever Lambda container, e.g.
+    123456789012.dkr.ecr.us-east-1.amazonaws.com/lambda-10x:1.1.38-native
+
+    No default, and there cannot be one: Lambda only pulls from a private ECR
+    repository in the function's own account, so the registry host is the
+    caller's account id. Mirror the published image there first (see the README's
+    Image section).
+
+    The tag must agree with `lambda_packaging` — which now defaults to `native`,
+    so an unmodified call site needs a `-native` tag here. Pointing at a JVM tag
+    without also setting `lambda_packaging = "jvm"` fails at
+    `terraform plan`, not at first invocation.
+  EOT
   type        = string
 }
 
@@ -12,15 +25,23 @@ variable "lambda_packaging" {
   description = <<-EOT
     How the retriever image `image_uri` is packaged for Lambda.
 
+      native  lambda-10x:<version>-native   — GraalVM binary named `bootstrap`
+              (DEFAULT)                       on public.ecr.aws/lambda/provided:al2023,
+              driving the Lambda Runtime API itself (RetrieverBootstrap).
+              Sub-second cold start. Single architecture per tag: the published
+              tag is linux/amd64, which is why `architectures` defaults to
+              ["x86_64"].
+
       jvm     lambda-10x:<version>          — shadow jar on the managed
               public.ecr.aws/lambda/java:21 base, handler-dispatched
               (com.log10x.ext.lambda.RetrieverHandler::handleRequest).
-              Multi-arch manifest, so either architecture resolves.
+              Multi-arch manifest, so either architecture resolves. Cold start
+              is measured in seconds.
 
-      native  lambda-10x:<version>-native   — GraalVM binary named `bootstrap`
-              on public.ecr.aws/lambda/provided:al2023, driving the Lambda
-              Runtime API itself (RetrieverBootstrap). Single architecture per
-              tag; `architectures` must match the one it was compiled for.
+    Native is the default because cold start is what the retriever's query path
+    is judged on, and the JVM packaging spends seconds there on every cold
+    invocation. The JVM packaging remains supported and is the right choice when
+    a call site needs arm64, since the published native tag is amd64-only.
 
     This is a packaging axis, not a distribution flavor. The retriever is an
     application — the same class of thing as the reporter or the receiver — and
@@ -35,7 +56,7 @@ variable "lambda_packaging" {
     only reference its own variable.
   EOT
   type        = string
-  default     = "jvm"
+  default     = "native"
   validation {
     condition     = contains(["jvm", "native"], var.lambda_packaging)
     error_message = "lambda_packaging must be \"jvm\" or \"native\"."
@@ -63,9 +84,20 @@ variable "architectures" {
     Instruction set for all four functions. Exactly one entry — Lambda accepts a
     list but rejects more than one.
 
-    For lambda_packaging = "native" this must match the architecture the binary
-    was compiled for. A mismatch is not caught at plan or apply: CreateFunction
-    succeeds and the first invocation fails with an exec-format error.
+    The default is ["x86_64"] because it is the only value the default packaging
+    can run. `lambda_packaging = "native"` deploys a compiled `bootstrap`, and
+    the published lambda-10x:<version>-native tag is built for linux/amd64 only
+    (docker-images/.github/workflows/publish_10x_lambda_native.yaml builds
+    `platforms: linux/amd64` and pushes a single-arch tag). Under the JVM
+    packaging this default was merely a safe pick — the JVM tag is a multi-arch
+    manifest and arm64 resolves too. Under the native default it is
+    load-bearing.
+
+    Setting ["arm64"] is valid with lambda_packaging = "jvm", or with a native
+    binary you compiled for arm64 yourself. It is NOT valid against the
+    published native tag, and nothing catches that: the tag says nothing about
+    its architecture, CreateFunction accepts the pairing, `terraform apply`
+    reports success, and the first invocation fails with an exec-format error.
   EOT
   type        = list(string)
   default     = ["x86_64"]
