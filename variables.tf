@@ -8,9 +8,9 @@ variable "image_uri" {
   type        = string
 }
 
-variable "runtime_flavor" {
+variable "lambda_packaging" {
   description = <<-EOT
-    Which retriever image `image_uri` points at.
+    How the retriever image `image_uri` is packaged for Lambda.
 
       jvm     lambda-10x:<version>          — shadow jar on the managed
               public.ecr.aws/lambda/java:21 base, handler-dispatched
@@ -22,30 +22,37 @@ variable "runtime_flavor" {
               Runtime API itself (RetrieverBootstrap). Single architecture per
               tag; `architectures` must match the one it was compiled for.
 
+    This is a packaging axis, not a distribution flavor. The retriever is an
+    application — the same class of thing as the reporter or the receiver — and
+    both images above carry the same application. Which engine distribution
+    built it (compiler or runtime) is a separate question this module does not
+    ask.
+
     Both are PackageType=Image, so this value changes tagging and the
-    architecture default only. Membership is checked here; agreement with the
-    image `image_uri` actually points at is checked at plan time by
-    terraform_data.flavor_gate in main.tf, because a variable validation may
+    architecture requirement only. Membership is checked here; agreement with
+    the image `image_uri` actually points at is checked at plan time by
+    terraform_data.packaging_gate in main.tf, because a variable validation may
     only reference its own variable.
   EOT
   type        = string
   default     = "jvm"
   validation {
-    condition     = contains(["jvm", "native"], var.runtime_flavor)
-    error_message = "runtime_flavor must be \"jvm\" or \"native\"."
+    condition     = contains(["jvm", "native"], var.lambda_packaging)
+    error_message = "lambda_packaging must be \"jvm\" or \"native\"."
   }
 }
 
-variable "allow_flavor_tag_mismatch" {
+variable "allow_packaging_tag_mismatch" {
   description = <<-EOT
-    Escape hatch for terraform_data.flavor_gate. The gate reads the flavor off
-    the image_uri tag suffix, which is the convention the published images
-    follow (`<version>-native` for native, `<version>` for jvm). Set true when
-    that convention does not apply to your reference — a digest-pinned URI, or
-    a retag into your own registry under different naming — and you accept that
-    runtime_flavor is then unverified. Leave false everywhere else: it is the
-    only thing standing between a wrong runtime_flavor and a stack that plans
-    clean, applies clean, and fails at first invocation.
+    Escape hatch for terraform_data.packaging_gate. The gate reads the
+    packaging off the image_uri tag suffix, which is the convention the
+    published images follow (`<version>-native` for native, `<version>` for
+    jvm). Set true when that convention does not apply to your reference — a
+    digest-pinned URI, or a retag into your own registry under different naming
+    — and you accept that lambda_packaging is then unverified. Leave false
+    everywhere else: it is the only thing standing between a wrong
+    lambda_packaging and a stack that plans clean, applies clean, and fails at
+    first invocation.
   EOT
   type        = bool
   default     = false
@@ -56,8 +63,8 @@ variable "architectures" {
     Instruction set for all four functions. Exactly one entry — Lambda accepts a
     list but rejects more than one.
 
-    For runtime_flavor = "native" this must match the architecture the binary was
-    compiled for. A mismatch is not caught at plan or apply: CreateFunction
+    For lambda_packaging = "native" this must match the architecture the binary
+    was compiled for. A mismatch is not caught at plan or apply: CreateFunction
     succeeds and the first invocation fails with an exec-format error.
   EOT
   type        = list(string)
@@ -72,13 +79,13 @@ variable "architectures" {
 }
 
 variable "image_entry_point" {
-  description = "Override the image's ENTRYPOINT. Leave empty to use the image's own — which is what both published flavors expect."
+  description = "Override the image's ENTRYPOINT. Leave empty to use the image's own — which is what both published images expect."
   type        = list(string)
   default     = []
 }
 
 variable "image_command" {
-  description = "Override the image's CMD. Leave empty to use the image's own: the handler string for the JVM flavor, an argv token the native bootstrap ignores."
+  description = "Override the image's CMD. Leave empty to use the image's own: the handler string for the jvm packaging, an argv token the native bootstrap ignores."
   type        = list(string)
   default     = []
 }

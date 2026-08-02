@@ -17,22 +17,26 @@ locals {
   name_prefix = var.name_prefix
   common_tags = merge(
     {
-      "tenx-retriever-deploy"  = "lambda"
-      "tenx-retriever-runtime" = var.runtime_flavor
-      terraform-module         = "tenx-retriever-lambda"
-      terraform-module-version = "v1.2.0"
-      managed-by               = "tenx-terraform"
+      "tenx-retriever-deploy" = "lambda"
+      # Tag key is "packaging", not "runtime". "Runtime" now names the native
+      # engine distribution, so a tag reading tenx-retriever-runtime = jvm
+      # asserts something false about what was deployed. The retriever is an
+      # application; jvm-vs-native is how its Lambda image is packaged.
+      "tenx-retriever-packaging" = var.lambda_packaging
+      terraform-module           = "tenx-retriever-lambda"
+      terraform-module-version   = "v2.0.0"
+      managed-by                 = "tenx-terraform"
     },
     var.tags,
   )
 }
 
 ############################################################
-# runtime_flavor ↔ image_uri gate
+# lambda_packaging ↔ image_uri gate
 ############################################################
-# runtime_flavor used to be checked for membership only (jvm | native) and was
+# This variable used to be checked for membership only (jvm | native) and was
 # then consumed exactly once, as a tag. Nothing correlated it with the image the
-# module actually deploys, so `runtime_flavor = "native"` against the JVM tag
+# module actually deploys, so `lambda_packaging = "native"` against the JVM tag
 # planned clean and applied clean; the only record of what was deployed was a
 # tag that said the opposite of the truth, and the four functions failed at
 # first invocation rather than at plan.
@@ -41,8 +45,8 @@ locals {
 # public.ecr.aws/lambda/java:21, handler-dispatched, multi-arch. The native one
 # is a GraalVM `bootstrap` on provided:al2023 driving the Runtime API itself,
 # single-architecture per tag. Published native tags carry a `-native` suffix;
-# JVM tags do not. That suffix is the only flavor evidence available offline, so
-# it is what the gate keys on.
+# JVM tags do not. That suffix is the only packaging evidence available offline,
+# so it is what the gate keys on.
 #
 # A `validation` block cannot do this: Terraform only lets a variable validation
 # reference its own variable, so the cross-check has to be a plan-time
@@ -51,7 +55,8 @@ locals {
 # Terraform will evaluate two variables against each other.
 locals {
   # A digest-pinned reference (…@sha256:<64 hex>) carries no tag, so nothing in
-  # it names a flavor. Detect it first, otherwise the digest hex parses as a tag.
+  # it names the packaging. Detect it first, otherwise the digest hex parses as
+  # a tag.
   image_is_digest_pinned = can(regex("@sha256:[0-9a-f]{64}$", var.image_uri))
 
   # Last colon-delimited segment, rejecting a registry port (`host:5000/repo`
@@ -65,10 +70,18 @@ locals {
   image_tag_says_native = local.image_tag == null ? null : can(regex("(^|[-._])native$", local.image_tag))
 }
 
-resource "terraform_data" "flavor_gate" {
+# v1.x called this terraform_data.flavor_gate. The rename is address-only —
+# same three preconditions, same evidence — so a `moved` block carries existing
+# state across instead of planning a spurious destroy/create.
+moved {
+  from = terraform_data.flavor_gate
+  to   = terraform_data.packaging_gate
+}
+
+resource "terraform_data" "packaging_gate" {
   input = {
-    runtime_flavor = var.runtime_flavor
-    image_tag      = local.image_tag
+    lambda_packaging = var.lambda_packaging
+    image_tag        = local.image_tag
   }
 
   lifecycle {
@@ -76,41 +89,42 @@ resource "terraform_data" "flavor_gate" {
       condition = (
         local.image_is_digest_pinned ||
         local.image_tag != null ||
-        var.allow_flavor_tag_mismatch
+        var.allow_packaging_tag_mismatch
       )
       error_message = <<-EOT
         image_uri "${var.image_uri}" carries neither a tag nor a @sha256 digest.
         A tagless reference resolves to :latest at pull time, which is a
-        different image on every deploy and names no flavor. Pin a tag
+        different image on every deploy and names no packaging. Pin a tag
         (lambda-10x:<version> for jvm, lambda-10x:<version>-native for native)
         or a digest.
       EOT
     }
 
     precondition {
-      condition     = !local.image_is_digest_pinned || var.allow_flavor_tag_mismatch
+      condition     = !local.image_is_digest_pinned || var.allow_packaging_tag_mismatch
       error_message = <<-EOT
-        image_uri is digest-pinned, so runtime_flavor = "${var.runtime_flavor}"
-        cannot be cross-checked against it: a digest names no flavor. Either pin
-        the tag instead, or set allow_flavor_tag_mismatch = true to accept the
-        reference unverified.
+        image_uri is digest-pinned, so lambda_packaging = "${var.lambda_packaging}"
+        cannot be cross-checked against it: a digest names no packaging. Either
+        pin the tag instead, or set allow_packaging_tag_mismatch = true to
+        accept the reference unverified.
       EOT
     }
 
     precondition {
       condition = (
-        var.allow_flavor_tag_mismatch ||
+        var.allow_packaging_tag_mismatch ||
         local.image_tag == null ||
-        local.image_tag_says_native == (var.runtime_flavor == "native")
+        local.image_tag_says_native == (var.lambda_packaging == "native")
       )
       error_message = <<-EOT
-        runtime_flavor = "${var.runtime_flavor}" contradicts the image_uri tag "${coalesce(local.image_tag, "(none)")}".
+        lambda_packaging = "${var.lambda_packaging}" contradicts the image_uri tag "${coalesce(local.image_tag, "(none)")}".
         The native retriever image is tagged <version>-native and runs a GraalVM
         bootstrap on provided:al2023; the JVM one is tagged <version> and is
         handler-dispatched on lambda/java:21. Deploying one while declaring the
         other plans and applies clean, then fails at first invocation.
-        Fix whichever is wrong, or set allow_flavor_tag_mismatch = true if you
-        retag these images into your own registry under a different convention.
+        Fix whichever is wrong, or set allow_packaging_tag_mismatch = true if
+        you retag these images into your own registry under a different
+        convention.
       EOT
     }
   }
@@ -244,8 +258,8 @@ locals {
 
   # Shared env for all Lambdas. Role-specific overrides merged in per-function.
   #
-  # JAVA_TOOL_OPTIONS is set for BOTH runtime flavors and must stay that way.
-  # On the JVM flavor the launcher applies it. On the native flavor there is no
+  # JAVA_TOOL_OPTIONS is set for BOTH packagings and must stay that way.
+  # On the jvm one the launcher applies it. On the native one there is no
   # launcher, so RetrieverBootstrap parses this variable itself in a static
   # initialiser and calls System.setProperty for each -D. Dropping it because
   # "a native image has no JVM" breaks the subquery role on every index range
@@ -297,13 +311,13 @@ locals {
   }
 }
 
-# Both runtime flavors are PackageType=Image, so the Lambda resource itself is
-# almost flavor-agnostic: the java21-vs-provided.al2023 base, the handler-vs-
+# Both packagings are PackageType=Image, so the Lambda resource itself is
+# almost packaging-agnostic: the java21-vs-provided.al2023 base, the handler-vs-
 # bootstrap dispatch and the CMD all live inside the image. `runtime` and
-# `handler` are unset for either flavor and must stay unset — setting them is
+# `handler` are unset for either one and must stay unset — setting them is
 # what CreateFunction rejects on an Image package.
 #
-# What is NOT flavor-agnostic is the architecture. The JVM image is a multi-arch
+# What is NOT packaging-agnostic is the architecture. The JVM image is a multi-arch
 # manifest, so Lambda picks the matching variant and x86_64 was safe to hardcode.
 # A native image is a single compiled binary: an amd64 `bootstrap` on an arm64
 # function fails at first invocation with an exec-format error, not at plan or
@@ -323,7 +337,7 @@ resource "aws_lambda_function" "role" {
 
   # Only emitted when the caller overrides the image's own ENTRYPOINT/CMD.
   # The stock images already carry the right one (the handler string for the
-  # JVM flavor, an ignored argv token for native), so this stays absent by
+  # jvm packaging, an ignored argv token for native), so this stays absent by
   # default rather than pinning a value that belongs to the image.
   dynamic "image_config" {
     for_each = (
