@@ -24,7 +24,7 @@ locals {
       # application; jvm-vs-native is how its Lambda image is packaged.
       "tenx-retriever-packaging" = var.lambda_packaging
       terraform-module           = "tenx-retriever-lambda"
-      terraform-module-version   = "v3.0.0"
+      terraform-module-version   = "v3.1.0"
       managed-by                 = "tenx-terraform"
     },
     var.tags,
@@ -32,7 +32,7 @@ locals {
 }
 
 ############################################################
-# lambda_packaging ↔ image_uri gate
+# lambda_packaging ↔ image_uri ↔ architectures gate
 ############################################################
 # This variable used to be checked for membership only (jvm | native) and was
 # then consumed exactly once, as a tag. Nothing correlated it with the image the
@@ -82,6 +82,7 @@ resource "terraform_data" "packaging_gate" {
   input = {
     lambda_packaging = var.lambda_packaging
     image_tag        = local.image_tag
+    architectures    = var.architectures
   }
 
   lifecycle {
@@ -125,6 +126,35 @@ resource "terraform_data" "packaging_gate" {
         Fix whichever is wrong, or set allow_packaging_tag_mismatch = true if
         you retag these images into your own registry under a different
         convention.
+      EOT
+    }
+
+    # arm64 + native. The published native tag is one amd64 manifest —
+    # `docker manifest inspect` on lambda-10x:1.1.39-native returns a single
+    # linux/amd64 entry, while the JVM tag of the same version returns a
+    # two-architecture index. Lambda does not check: CreateFunction accepts
+    # architectures = ["arm64"] against an amd64 `bootstrap`, apply reports
+    # success, and every one of the four functions dies on its first
+    # invocation with an exec-format error. This precondition is the last
+    # point at which that pairing is still cheap to fix.
+    precondition {
+      condition = (
+        var.allow_arm64_native ||
+        var.lambda_packaging != "native" ||
+        !contains(var.architectures, "arm64")
+      )
+      error_message = <<-EOT
+        architectures = ["arm64"] with lambda_packaging = "native" cannot run.
+        Set lambda_packaging = "jvm" to deploy arm64: the JVM image is a
+        multi-architecture manifest and arm64 resolves from it. The published
+        native tag (lambda-10x:<version>-native) is a single linux/amd64
+        manifest holding one compiled binary, so an arm64 function gets an
+        amd64 `bootstrap` — accepted by CreateFunction, applied clean, then
+        exec-format error on first invocation.
+        Keeping native and staying on x86_64 works too: drop `architectures`
+        to take the default ["x86_64"].
+        If you compiled the native image for arm64 yourself and image_uri
+        points at that build, set allow_arm64_native = true.
       EOT
     }
   }

@@ -79,6 +79,22 @@ variable "allow_packaging_tag_mismatch" {
   default     = false
 }
 
+variable "allow_arm64_native" {
+  description = <<-EOT
+    Escape hatch for the arm64 + native precondition in
+    terraform_data.packaging_gate. The published native tag is a single
+    linux/amd64 manifest, so the gate refuses arm64 under
+    lambda_packaging = "native".
+
+    Set true only when image_uri points at a native retriever image you
+    compiled for arm64 yourself. Setting it true against a published
+    `<version>-native` tag buys nothing but a stack that applies clean and
+    then returns an exec-format error on every invocation.
+  EOT
+  type        = bool
+  default     = false
+}
+
 variable "architectures" {
   description = <<-EOT
     Instruction set for all four functions. Exactly one entry — Lambda accepts a
@@ -94,10 +110,13 @@ variable "architectures" {
     load-bearing.
 
     Setting ["arm64"] is valid with lambda_packaging = "jvm", or with a native
-    binary you compiled for arm64 yourself. It is NOT valid against the
-    published native tag, and nothing catches that: the tag says nothing about
-    its architecture, CreateFunction accepts the pairing, `terraform apply`
-    reports success, and the first invocation fails with an exec-format error.
+    binary you compiled for arm64 yourself (allow_arm64_native = true). It is
+    NOT valid against the published native tag: the tag says nothing about its
+    architecture, CreateFunction accepts the pairing, `terraform apply` reports
+    success, and the first invocation fails with an exec-format error. Since
+    v3.1.0 that pairing is refused at plan time by
+    terraform_data.packaging_gate in main.tf rather than left to be discovered
+    at first invocation.
   EOT
   type        = list(string)
   default     = ["x86_64"]
