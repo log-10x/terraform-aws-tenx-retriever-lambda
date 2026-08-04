@@ -121,12 +121,29 @@ because Terraform only lets a variable validation reference its own variable.
 `terraform validate` still passes on a mismatch; `terraform plan` is the
 earliest point where the two values can be compared.
 
-An architecture mismatch on the native packaging is invisible until runtime, and
-the gate above cannot catch it: a tag names the packaging but says nothing about
-the architecture. `CreateFunction` accepts `["arm64"]` against an amd64
-`bootstrap`, `terraform apply` reports success, and the first invocation fails
-with an exec-format error. Leaving `architectures` at its `["x86_64"]` default is
-what keeps the default packaging correct — do not change one without the other.
+The same gate refuses `architectures = ["arm64"]` under
+`lambda_packaging = "native"`, which is the other pairing that used to reach
+production before failing:
+
+```
+Error: Resource precondition failed
+  architectures = ["arm64"] with lambda_packaging = "native" cannot run.
+  Set lambda_packaging = "jvm" to deploy arm64: [...]
+```
+
+That check does not read the image, because a tag names the packaging and says
+nothing about the architecture. It reads the two inputs against each other and
+relies on how the images are published: `docker manifest inspect
+log10x/lambda-10x:1.1.39-native` returns one image manifest at
+`linux/amd64`, while `log10x/lambda-10x:1.1.39` returns an index carrying
+`linux/arm64` and `linux/amd64`. `CreateFunction` accepts `["arm64"]` against
+an amd64 `bootstrap`, `terraform apply` reports success, and the first
+invocation fails with an exec-format error.
+
+Two ways to run on `arm64`: set `lambda_packaging = "jvm"` and point `image_uri`
+at the untagged-suffix image, or compile the native image for arm64 yourself,
+point `image_uri` at that build, and set `allow_arm64_native = true`. Staying on
+`x86_64` needs nothing — it is the default.
 
 `JAVA_TOOL_OPTIONS` is set on both packagings and should stay that way. The native binary has no JVM launcher to read it, so `RetrieverBootstrap` parses the variable itself and applies each `-D` before the HTTP client initialises. Removing it as JVM-only leftovers breaks the subquery role on every index range with `restricted header name: "host"`.
 
@@ -292,7 +309,8 @@ is enough for mid-market query volumes.
 | `enable_query_url` | true | Lambda Function URL exposing `POST /retriever/query`. Cheaper and simpler than API Gateway. Set to false if fronting with API GW for custom auth/routing. |
 | `lambda_packaging` | `"native"` | Which image `image_uri` points at — `native` (GraalVM `bootstrap`, sub-second cold start) or `jvm`. Sets the `tenx-retriever-packaging` tag on every resource so the deployed packaging is readable without inspecting the image, and is cross-checked against the `image_uri` tag at plan time. |
 | `allow_packaging_tag_mismatch` | false | Escape hatch for that cross-check. Set true for a digest-pinned `image_uri`, or a retag into a registry that does not use the `-native` suffix. `lambda_packaging` is then unverified. |
-| `architectures` | `["x86_64"]` | Exactly one of `["x86_64"]` or `["arm64"]`. The published native tag is amd64-only, so this default is the one the default packaging requires. `["arm64"]` is reachable only via `lambda_packaging = "jvm"` or a self-compiled arm64 binary. |
+| `architectures` | `["x86_64"]` | Exactly one of `["x86_64"]` or `["arm64"]`. The published native tag is amd64-only, so this default is the one the default packaging requires. `["arm64"]` is reachable only via `lambda_packaging = "jvm"` or a self-compiled arm64 binary; any other arm64 call site fails at `terraform plan`. |
+| `allow_arm64_native` | false | Escape hatch for that arm64 refusal. Set true only when `image_uri` points at a native image you compiled for arm64 yourself. |
 | `ephemeral_storage_mb` | null | Size of `/tmp`. Null keeps Lambda's 512 MB. The stream role stages fetched blobs there. |
 | `image_entry_point` / `image_command` | `[]` | Override the image's ENTRYPOINT/CMD. Both published images already carry the right one; leave empty. |
 
