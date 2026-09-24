@@ -1,0 +1,53 @@
+name: Required checks
+
+# The one check every pull request to main must pass, whatever it touches.
+#
+# Every other workflow in this repository is path-filtered, so none of them can
+# be a required status check: a pull request that changes nothing on their path
+# would wait forever for a report that never comes. This workflow has no path
+# filter, which is what lets the ruleset require it (SOC 2 CHG-06/A3, D-21).
+#
+# It checks two things that apply to every change:
+#   1. The pull request describes the change. Change control asks for a
+#      description on every merged change, and an empty body is the one case
+#      a reviewer cannot recover from later.
+#   2. The change itself adds no secret. gitleaks scans only the commits in
+#      this pull request, so existing history and test fixtures elsewhere do
+#      not fail new work. Push protection covers pushes; this covers what a
+#      pull request brings in from a branch pushed before it was enabled.
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  required:
+    name: required
+    runs-on: ubuntu-latest
+    steps:
+      - name: Pull request has a description
+        env:
+          BODY: ${{ github.event.pull_request.body }}
+        run: |
+          if [ -z "$(printf '%s' "$BODY" | tr -d '[:space:]')" ]; then
+            echo "::error::This pull request has no description. Say what changes and why."
+            exit 1
+          fi
+          echo "description present ($(printf '%s' "$BODY" | wc -c) bytes)"
+
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: No secrets in this pull request's commits
+        env:
+          GITLEAKS_VERSION: 8.30.1
+        run: |
+          set -euo pipefail
+          curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" | tar -xz gitleaks
+          ./gitleaks git --config .gitleaks.toml --redact --no-banner \
+            --log-opts="${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}"
