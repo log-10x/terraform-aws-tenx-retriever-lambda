@@ -1,0 +1,23 @@
+# gitleaks configuration for the "Required checks" workflow.
+# Extends the default rules; the allowlist names only known, deliberately
+# public values, each with its reason. Anything else still fails.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Known public values"
+regexes = [
+  # Azurite storage emulator well-known account key, published by Microsoft
+  # for local testing; used in pipeline-extensions integration tests.
+  '''Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==''',
+  # Hostnames under log10x.com written as "API: host" in docs, not keys.
+  '''^[a-z0-9.-]+\.log10x\.com$''',
+]
+paths = [
+  # The deliberately public, node-limited licence baked into the public image
+  # (sub: log10x-public-image, license_type: limited, node_count: 1).
+  '''(^|/)license\.jwt$''',
+  # Expected-signature test vectors for the Azure SharedKey signer, computed
+  # from the public Azurite key above.
+  '''(^|/)src/test/java/.*/SharedKeyCredentialTest\.java$''',
+]
