@@ -24,7 +24,7 @@ locals {
       # application; jvm-vs-native is how its Lambda image is packaged.
       "tenx-retriever-packaging" = var.lambda_packaging
       terraform-module           = "tenx-retriever-lambda"
-      terraform-module-version   = "v3.1.0"
+      terraform-module-version   = "v3.1.1"
       managed-by                 = "tenx-terraform"
     },
     var.tags,
